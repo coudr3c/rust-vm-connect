@@ -3,13 +3,22 @@
 use aws_config::{meta::region::RegionProviderChain, BehaviorVersion};
 use aws_sdk_ssm::{config::{Region}, error::SdkError, operation::{start_session::{StartSessionError, StartSessionOutput}, terminate_session::TerminateSessionOutput}, Client};
 use clap::Parser;
-use tokio::sync::oneshot::{Receiver, Sender};
+use tokio::sync::oneshot::{error::TryRecvError, Receiver, Sender};
 use core::{f32};
-use std::{io::{BufRead, BufReader}, process::{Command, Stdio}};
+use std::{io::{BufRead, BufReader}, process::{Command, Stdio}, time::Duration};
 use serde::Serialize;
 use eframe::{egui};
 use tokio::sync::oneshot;
 
+use crate::tunnel_task_instance::TunnelTaskInstance;
+use crate::messages::{ ApplicationExitedMessage, SSMTunnelLaunchedMessage };
+use crate::errors::{ SSMError, SSMErrorKind };
+use crate::utils::send_log;
+
+pub mod tunnel_task_instance;
+pub mod messages;
+pub mod errors;
+pub mod utils;
 #[derive(Serialize)]
 struct ResponseJson {
     SessionId: String,
@@ -26,18 +35,6 @@ struct Opt {
     /// Whether to display additional information.
     #[structopt(short, long)]
     verbose: bool,
-}
-
-#[derive(Debug)]
-struct SSMError {
-    kind: SSMErrorKind,
-    msg: String
-}
-
-#[derive(Debug)]
-enum SSMErrorKind {
-    StartSessionError,
-    CommandSpawnError
 }
 
 // Starts a SSM session
@@ -129,7 +126,6 @@ fn output_tunnel(buf_reader: &mut BufReader<std::process::ChildStdout>, logs_sen
     //let mut buf = [0; 10];
 
     let mut buf = String::new();
-    let mut discard_buf = String::new();
 
     // Empty line
     buf_reader.read_line(&mut buf).expect("Error while reading tunnel process line");
@@ -142,12 +138,17 @@ fn output_tunnel(buf_reader: &mut BufReader<std::process::ChildStdout>, logs_sen
     //buf_reader.read_exact(&mut last_buf).expect("Error while reading tunnel process line");
     buf_reader.read_line(&mut buf).expect("Error while reading tunnel process line");
     // Next line is pending, don't need it
-    //buf_reader.read_line(&mut discard_buf).expect("Error while reading tunnel process line");
 
     send_log(buf.clone().into(), &logs_sender);
     //println!("{}", std::str::from_utf8(&last_buf).unwrap());
 
     buf.contains("Waiting for connections...")
+}
+
+fn spawn_rdp() -> Result<std::process::Child, std::io::Error> {
+    Command::new("cmd")
+        .args(["/C", "echo hello"])
+        .spawn()
 }
 
 async fn launch_ssm_tunnel(
@@ -194,7 +195,6 @@ async fn launch_ssm_tunnel(
 struct EguiApp {
     username: String,
     pwd: String,
-    vm: VMOptions,
     vm_target: String,
     disabled: bool,
     logs_output: String,
@@ -203,13 +203,8 @@ struct EguiApp {
     logs_sender: std::sync::mpsc::Sender<String>,
     vm1_target: String,
     vm2_target: String,
-    join_handler: Option<std::thread::JoinHandle<()>>
-}
-
-#[derive(Debug, PartialEq)]
-enum VMOptions {
-    First,
-    Second
+    join_handler: Option<std::thread::JoinHandle<()>>,
+    handler_running: bool
 }
 
 impl Default for EguiApp {
@@ -220,7 +215,6 @@ impl Default for EguiApp {
         Self {
             username: "Administrator".to_owned(),
             pwd: "".into(),
-            vm: VMOptions::First,
             disabled: false,
             logs_output: "LOGS :\n".into(),
             application_exit_sender: None,
@@ -229,7 +223,8 @@ impl Default for EguiApp {
             vm_target: "i-0f30a1dd89600b0dc".into(),
             vm1_target: "i-0f30a1dd89600b0dc".into(),
             vm2_target: "i-0a6eb481a98d54b72".into(),
-            join_handler: None
+            join_handler: None,
+            handler_running: false
         }
     }
 }
@@ -237,7 +232,7 @@ impl Default for EguiApp {
 impl eframe::App for EguiApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         send_log("Terminate session...".into(), &self.logs_sender);
-        self.application_exit_sender.take().map_or_else(|| send_log("No SSM session to stop".into(), &self.logs_sender) , |tx| {
+        self.application_exit_sender.take().map_or_else(|| send_log("No session to stop".into(), &self.logs_sender) , |tx| {
             tx.send(ApplicationExitedMessage).expect("ApplicationExitedMessage receiver was dropped");
             self.join_handler.take().map_or_else(|| send_log("No thread to stop".into(), &self.logs_sender), |h|  {
                 send_log("Egui app : stop app msg sent to handler, waiting for handler thread to stop.".into(), &self.logs_sender);
@@ -248,6 +243,15 @@ impl eframe::App for EguiApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+
+        let taken_handler = self.join_handler.take_if(|handler| handler.is_finished());
+
+        if taken_handler.is_some() {
+            taken_handler.unwrap().join().expect("Error while joining handler thread");
+            self.disabled = false;
+            self.handler_running = false;
+            self.application_exit_sender = None;
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Connection VM SSM");
@@ -267,33 +271,32 @@ impl eframe::App for EguiApp {
             ui.horizontal(|ui| {
                 if ui.add_enabled(
                     !self.disabled, 
-                    egui::Button::new("Connection au Tunnel")
+                    egui::Button::new("Connection")
                 )
                 .on_disabled_hover_text("Tunnel déjà lancé")
                 .clicked() {
-                    //if !self.disabled {
 
-                        let (tx_exit, rx_exit) = oneshot::channel();
+                    let (tx_exit, rx_exit) = oneshot::channel();
 
-                        self.application_exit_sender = Some(tx_exit);
-                        
-                        let target = self.vm_target.clone();
-                        let logs_sender = self.logs_sender.clone();
+                    self.application_exit_sender = Some(tx_exit);
+                    
+                    let target = self.vm_target.clone();
+                    let logs_sender = self.logs_sender.clone();
 
-                        // Spawn a thread that spawns a tokio task so that
-                        // the gui stays synchronous while still making sure tasks are done
-                        self.join_handler = Some(std::thread::spawn(move || {
-                            tokio::runtime::Builder::new_multi_thread()
-                                .enable_all()
-                                .build()
-                                .unwrap()
-                                .block_on(
-                                tasks_handler(target,rx_exit, logs_sender)
-                            );
-                        }));
+                    // Spawns a thread that spawns a tokio task so that
+                    // the gui stays synchronous while still making sure tasks are done
+                    self.join_handler = Some(std::thread::spawn(move || {
+                        tokio::runtime::Builder::new_multi_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap()
+                            .block_on(
+                            tasks_handler(target,rx_exit, logs_sender)
+                        );
+                    }));
 
-                        self.disabled = true;
-                    //}
+                    self.disabled = true;
+                    self.handler_running = true;
                 }
             }
             );
@@ -312,55 +315,50 @@ impl eframe::App for EguiApp {
     }
 }
 
-#[derive(Debug)]
-struct SSMTunnelLaunchedMessage {
-    ok: bool
-}
-
-#[derive(Debug)]
-
-struct ApplicationExitedMessage;
-
-fn send_log(s: String, logs_sender: &std::sync::mpsc::Sender<String>) {
-    println!("{}", &s);
-    logs_sender.send(s + "\n").expect("Error sending log");
-}
-
 async fn tasks_handler(
     target: String,
-    rx_app_exit: Receiver<ApplicationExitedMessage>,
+    mut rx_app_exit: Receiver<ApplicationExitedMessage>,
     logs_sender: std::sync::mpsc::Sender<String>
 ) {
 
-    let (tx_tunnel_launched, rx_tunnel_launched) = oneshot::channel();
-    let (tx_exit_ssm, rx_exit_ssm) = oneshot::channel();
-    let (tx_exit_ssm_ack, rx_exit_ssm_ack) = oneshot::channel();
-
-    let logs_sender_cloned = logs_sender.clone();
-
-    let ssm_tunnel_task = tokio::spawn(
-        launch_ssm_tunnel(target, tx_tunnel_launched, rx_exit_ssm, tx_exit_ssm_ack, logs_sender_cloned)
-    );
+    let mut tunnel_task_instance = TunnelTaskInstance::spawn(target, logs_sender.clone());
 
     // Wait for tunnel to be set up
-    if rx_tunnel_launched.await.expect("SSMTunnelLaunchedMessage sender was dropped").ok {
+    // take() because when value has been received it is invalidated
+    if tunnel_task_instance.tunnel_created_receiver.take().unwrap().await.expect("SSMTunnelLaunchedMessage sender was dropped").ok {
         send_log("Should spawn RDP now, just wait for now".into(), &logs_sender);
     } else {
-        send_log("Tunnel start error".into(), &logs_sender)
+        send_log("Tunnel start error".into(), &logs_sender);
+        return
     }
 
-    // Wait for app to exit
-    rx_app_exit.await.expect("ApplicationExitedMessage sender was dropped");
-    send_log("Handler : Main application exit received".into(), &logs_sender);
-    // Send exit msg to SSM Tunnel
-    tx_exit_ssm.send(ApplicationExitedMessage).expect("ApplicationExitedMessage (SSM Tunnel) receiver was dropped");
-    send_log("Handler : SSM Tunnel application exit sent".into(), &logs_sender);
-    // Wait for SSM tunnel to send ack msg and stop
-    rx_exit_ssm_ack.await.expect("SSM Tunnel ack sender dropped");
-    send_log("Handler : SSM Tunnel Ack received".into(), &logs_sender);
-    ssm_tunnel_task.await.expect("Error while joining ssm tunnel task").expect("Error while running launch ssm tunnel");
-    send_log("Handler : Main handler stopped".into(), &logs_sender);
+    send_log("Try to spawn RDP".into(), &logs_sender);
+    spawn_rdp().map(async |mut rdp_task| {    
+        loop {
+            match rx_app_exit.try_recv() {
+                // Error => main App is still running
+                Err(_) => {
+                    // Check whether RDP task is still running
+                    if rdp_task.try_wait().is_ok() {
+                        send_log("RDP task over, stop tunnel and handler".into(), &logs_sender);
+                        break
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
 
+                // App exit message has been received
+                _ => {
+                    if rdp_task.try_wait().is_err() {
+                        rdp_task.kill().expect("Error while trying to kill RDP task");
+                    }
+                    break
+                }
+            }
+        }
+    }).expect("Error while trying to spawn RDP command").await;
+
+    tunnel_task_instance.stop().await;
+    send_log("Stop handler".into(), &logs_sender);
 }
 
 // snippet-end:[ssm.rust.describe-parameters]
