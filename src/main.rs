@@ -1,196 +1,21 @@
 #![allow(clippy::result_large_err)]
-
-use aws_config::{meta::region::RegionProviderChain, BehaviorVersion};
-use aws_sdk_ssm::{config::{Region}, error::SdkError, operation::{start_session::{StartSessionError, StartSessionOutput}, terminate_session::TerminateSessionOutput}, Client};
-use clap::Parser;
-use tokio::sync::oneshot::{error::TryRecvError, Receiver, Sender};
+use tokio::sync::oneshot::{Receiver, Sender};
 use core::{f32};
-use std::{io::{BufRead, BufReader}, process::{Command, Stdio}, time::Duration};
-use serde::Serialize;
 use eframe::{egui};
 use tokio::sync::oneshot;
 
-use crate::tunnel_task_instance::TunnelTaskInstance;
-use crate::messages::{ ApplicationExitedMessage, SSMTunnelLaunchedMessage };
-use crate::errors::{ SSMError, SSMErrorKind };
-use crate::utils::send_log;
+mod ssm;
+mod rdp;
 
-pub mod tunnel_task_instance;
-pub mod messages;
-pub mod errors;
-pub mod utils;
-#[derive(Serialize)]
-struct ResponseJson {
-    SessionId: String,
-    TokenValue: String,
-    StreamUrl: String
-}
+mod tasks_handler;
 
-#[derive(Debug, Parser)]
-struct Opt {
-    /// The AWS Region.
-    #[structopt(short, long)]
-    region: Option<String>,
+mod messages;
+use messages::{ ApplicationExitedMessage };
 
-    /// Whether to display additional information.
-    #[structopt(short, long)]
-    verbose: bool,
-}
+mod errors;
 
-// Starts a SSM session
-// snippet-start:[ssm.rust.start-session]
-async fn start_session(target: String, client: &Client) -> Result<StartSessionOutput, SdkError<StartSessionError>> {
-    // i-0a6eb481a98d54b72 : VM2
-    // i-0f30a1dd89600b0dc : VM1
-    let resp = client.start_session()
-        .target(target)
-        .document_name("AWS-StartPortForwardingSession")
-        .parameters("localPortNumber", vec!["55678".to_string()])
-        .parameters("portNumber", vec!["3389".to_string()])
-        .send()
-        .await
-    ;
-
-    resp
-}
-
-// Terminates a SSM session
-// snippet-start:[ssm.rust.start-session]
-async fn terminate_session(client: &Client, session_id: Option<String>) -> Result<Option<String>, aws_sdk_ssm::Error> {
-    let resp = client.terminate_session()
-        .set_session_id(session_id)
-        .send()
-        .await?
-    ;
-
-    let session_id: Option<String> = match resp  {
-        TerminateSessionOutput {session_id, ..} => session_id
-    };
-
-    Ok(session_id)
-}
-
-// fn ctrl_channel() -> Result<Receiver<()>, ctrlc::Error> {
-//     let (sender, receiver) = bounded(100);
-//     ctrlc::set_handler(move || {
-//         let _ = sender.send(());
-//     })?;
-
-//     Ok(receiver)
-// }
-
-async fn initiate_aws_client() -> Client {
-    let Opt { region, verbose: _} = Opt::parse();
-
-    let region_provider = RegionProviderChain::first_try(region.map(Region::new))
-        .or_default_provider()
-        .or_else(Region::new("eu-west-1"));
-
-    let shared_config = aws_config::defaults(BehaviorVersion::latest()).region(region_provider).load().await;
-    
-    Client::new(&shared_config)
-}
-
-async fn initiate_ssm_port_forwarding(start_session_output: &StartSessionOutput) -> Result<std::process::Child, SSMError> {
-
-    // create ssm plugin json message
-    let response = ResponseJson {
-        SessionId: start_session_output.session_id().unwrap().into(),
-        TokenValue: start_session_output.token_value().unwrap().into(), // Assuming `token` is defined elsewhere
-        StreamUrl: start_session_output.stream_url().unwrap().into(),
-    };
-
-    let response_string = match serde_json::to_string(&response) {
-        Ok(res) => res,
-        Err(_) => return Err(SSMError { kind: SSMErrorKind::StartSessionError, msg: "Error when attempting to create response string".into() })
-    };
-
-    let mut session_manager_plugin = Command::new("session-manager-plugin");
-    let run_command_output = session_manager_plugin
-        .args([
-            response_string,
-            "eu-west-1".into(),
-            "StartSession".into(),
-        ])
-        .stdout(Stdio::piped())
-        .spawn();
-
-    match run_command_output {
-        Ok(c) => Ok(c),
-        Err(_) => return Err(SSMError { kind: SSMErrorKind::CommandSpawnError, msg: "Error when attempting to session manager spawn command thread".into() })
-    }
-
-}
-
-fn output_tunnel(buf_reader: &mut BufReader<std::process::ChildStdout>, logs_sender: &std::sync::mpsc::Sender<String>) -> bool {
-    //let mut buf = [0; 10];
-
-    let mut buf = String::new();
-
-    // Empty line
-    buf_reader.read_line(&mut buf).expect("Error while reading tunnel process line");
-    // "Starting session"
-    buf_reader.read_line(&mut buf).expect("Error while reading tunnel process line");
-    //  Port xxx opened
-    buf_reader.read_line(&mut buf).expect("Error while reading tunnel process line");
-    // Waiting for connections...
-    //let mut last_buf = [0; "Waiting for connections...".len()];
-    //buf_reader.read_exact(&mut last_buf).expect("Error while reading tunnel process line");
-    buf_reader.read_line(&mut buf).expect("Error while reading tunnel process line");
-    // Next line is pending, don't need it
-
-    send_log(buf.clone().into(), &logs_sender);
-    //println!("{}", std::str::from_utf8(&last_buf).unwrap());
-
-    buf.contains("Waiting for connections...")
-}
-
-fn spawn_rdp() -> Result<std::process::Child, std::io::Error> {
-    Command::new("cmd")
-        .args(["/C", "echo hello"])
-        .spawn()
-}
-
-async fn launch_ssm_tunnel(
-    vm_target: String,
-    tx_tunnel_launched: Sender<SSMTunnelLaunchedMessage>,
-    rx_app_exit: Receiver<ApplicationExitedMessage>,
-    tx_app_exit_ack: Sender<ApplicationExitedMessage>,
-    logs_sender: std::sync::mpsc::Sender<String>) -> Result<(), SSMError> {
-
-    let aws_client = initiate_aws_client().await;
-
-    let start_session_output = match start_session(vm_target, &aws_client).await {
-        Ok(s) => s,
-        _ => return Err(SSMError { kind: SSMErrorKind::StartSessionError, msg: "Error when starting session".into() })
-    };
-
-    let mut tunnel_child = match initiate_ssm_port_forwarding(&start_session_output).await {
-        Ok(c) => c,
-        Err(e) => panic!("{}", e.msg)
-    };
-
-    let stdout = tunnel_child.stdout.take().expect("handle present");
-    let mut buf_reader = std::io::BufReader::new(stdout);
-
-    let ret = output_tunnel(&mut buf_reader, &logs_sender);
-
-    tx_tunnel_launched.send(SSMTunnelLaunchedMessage{ok: ret}).expect("SMTunnelLaunchedMessage receiver was dropped");
-
-    rx_app_exit.await.expect("ApplicationExitedMessage sender was dropped (ssm thread)");
-    send_log("SSM Tunnel : stop app received".into(), &logs_sender);
-    tx_app_exit_ack.send(ApplicationExitedMessage).expect("SSM App exit ack receiver dropped");
-    send_log("SSM Tunnel : stop app ack sent, terminating session and stopping".into(), &logs_sender);
-
-    match terminate_session(&aws_client, start_session_output.session_id.clone()).await {
-        Ok(_) => send_log("SSM Tunnel : Session terminated".into(), &logs_sender),
-        _ => send_log("SSM Tunnel : Error while trying to terminate session".into(), &logs_sender)
-    }
-    tunnel_child.kill().expect("Error while killing ssm thread");
-    send_log("SSM Tunnel : child killed".into(), &logs_sender);
-
-    Ok(())
-}
+mod utils;
+use utils::send_log;
 
 struct EguiApp {
     username: String,
@@ -291,8 +116,8 @@ impl eframe::App for EguiApp {
                             .build()
                             .unwrap()
                             .block_on(
-                            tasks_handler(target,rx_exit, logs_sender)
-                        );
+                            tasks_handler::start(target,rx_exit, logs_sender)
+                        )
                     }));
 
                     self.disabled = true;
@@ -313,52 +138,6 @@ impl eframe::App for EguiApp {
 
         });
     }
-}
-
-async fn tasks_handler(
-    target: String,
-    mut rx_app_exit: Receiver<ApplicationExitedMessage>,
-    logs_sender: std::sync::mpsc::Sender<String>
-) {
-
-    let mut tunnel_task_instance = TunnelTaskInstance::spawn(target, logs_sender.clone());
-
-    // Wait for tunnel to be set up
-    // take() because when value has been received it is invalidated
-    if tunnel_task_instance.tunnel_created_receiver.take().unwrap().await.expect("SSMTunnelLaunchedMessage sender was dropped").ok {
-        send_log("Should spawn RDP now, just wait for now".into(), &logs_sender);
-    } else {
-        send_log("Tunnel start error".into(), &logs_sender);
-        return
-    }
-
-    send_log("Try to spawn RDP".into(), &logs_sender);
-    spawn_rdp().map(async |mut rdp_task| {    
-        loop {
-            match rx_app_exit.try_recv() {
-                // Error => main App is still running
-                Err(_) => {
-                    // Check whether RDP task is still running
-                    if rdp_task.try_wait().is_ok() {
-                        send_log("RDP task over, stop tunnel and handler".into(), &logs_sender);
-                        break
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                }
-
-                // App exit message has been received
-                _ => {
-                    if rdp_task.try_wait().is_err() {
-                        rdp_task.kill().expect("Error while trying to kill RDP task");
-                    }
-                    break
-                }
-            }
-        }
-    }).expect("Error while trying to spawn RDP command").await;
-
-    tunnel_task_instance.stop().await;
-    send_log("Stop handler".into(), &logs_sender);
 }
 
 // snippet-end:[ssm.rust.describe-parameters]
@@ -385,36 +164,4 @@ async fn main() -> eframe::Result {
             Ok(Box::<EguiApp>::default())
         }),
     )
-    //tracing_subscriber::fmt::init();
-
-    
-    // Connect to the WebSocket URL
-    //let (ws_stream, _) = connect_async(wss_url).await?;
-    //let (mut write, _) = ws_stream.split();
-
-    // Send the JSON message to the WebSocket
-    //write.send(Message::Text(response_string)).await?;
-
-    //let mut stdout = run_command_output.stdout.as_mut();
-
-    // let ctrl_c_events: Receiver<()> = ctrl_channel().unwrap();
-
-    // loop {
-    //     //let mut str = String::new();
-    //     //stdout.read_to_string(&mut str);
-    //     sleep(time::Duration::from_secs(1));
-
-    //     select! {
-    //         recv(ctrl_c_events) -> _ => {
-    //             println!();
-    //             send_log("Terminate session...".into(), &logs_sender);
-    //             run_command_output.kill()?;
-    //             break;
-    //         }
-    //     }
-    // }
-    
-    // send_log("Terminated".into(), &logs_sender);
-
-    // Ok(())
 }
