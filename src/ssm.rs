@@ -1,10 +1,10 @@
+use aws_sdk_ssm::operation::start_session::StartSessionError;
 use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::oneshot::{ Sender, Receiver };
 use tokio::sync::oneshot;
-use aws_sdk_ssm::{config::{Region}, error::SdkError, operation::{start_session::{StartSessionError, StartSessionOutput}, terminate_session::TerminateSessionOutput}, Client};
+use aws_sdk_ssm::{config::{Region}, error::SdkError, operation::{start_session::{StartSessionOutput}, terminate_session::TerminateSessionOutput}, Client};
 use aws_config::{meta::region::RegionProviderChain, BehaviorVersion};
 use clap::Parser;
-use std::iter;
 use std::{io::{BufRead, BufReader}, process::{Command, Stdio}};
 use serde::Serialize;
 
@@ -19,14 +19,13 @@ pub struct SSMError {
 
 #[derive(Debug)]
 pub enum SSMErrorKind {
-    StartSessionError,
-    CommandSpawnError,
-    InitPortForwardingError,
-    SerdeError,
-    IOError,
-    TerminateSessionError,
-    TokioChannelError,
-    CommandKillError
+    StartSession,
+    CommandSpawn,
+    Serde,
+    IO,
+    TerminateSession,
+    TokioChannel,
+    CommandKill
 }
 
 pub struct TunnelTaskInstance {
@@ -50,26 +49,22 @@ impl TunnelTaskInstance {
             launch_ssm_tunnel(target, tx_tunnel_launched, rx_exit_ssm, tx_exit_ssm_ack, logs_sender.clone())
         );
 
-        return TunnelTaskInstance {
+        TunnelTaskInstance {
             stop_sender: tx_exit_ssm,
             stop_ack_receiver: rx_exit_ssm_ack,
             tunnel_created_receiver: Some(rx_tunnel_launched),
             task_handler: ssm_tunnel_task,
-            logs_sender: logs_sender
+            logs_sender
         }
     }
 
-    fn abort(self: &Self) {
-        self.task_handler.abort();
-    }
-
-    pub async fn stop(self: Self) -> Result<(), SSMError> {
+    pub async fn stop(self) -> Result<(), SSMError> {
         // Send exit msg to SSM Tunnel
         send(self.stop_sender, ApplicationExitedMessage)?;
-        send_log("Handler : SSM Tunnel application exit sent".into(), &self.logs_sender);
+        send_log("TunnelTaskInstance : SSM Tunnel application exit sent".into(), &self.logs_sender);
         // Wait for SSM tunnel to send ack msg and stop
         receive(self.stop_ack_receiver.await)?;
-        send_log("Handler : SSM Tunnel Ack received".into(), &self.logs_sender);
+        send_log("TunnelTaskInstance : SSM Tunnel Ack received".into(), &self.logs_sender);
         receive(self.task_handler.await)
     }
 }
@@ -92,7 +87,7 @@ pub async fn launch_ssm_tunnel(
 
     let start_session_output = match start_session(vm_target, &aws_client).await {
         Ok(s) => s,
-        _ => return Err(SSMError { kind: SSMErrorKind::StartSessionError, msg: "launch_ssm_tunnel : Error when starting session".into() })
+        _ => return Err(SSMError { kind: SSMErrorKind::StartSession, msg: "launch_ssm_tunnel : Error when starting session".into() })
     };
 
     let mut tunnel_child = try_or_terminate_session(
@@ -103,15 +98,15 @@ pub async fn launch_ssm_tunnel(
         Some(c) => c,
         _ => {
             match terminate_session(&aws_client, start_session_output.session_id.clone()).await {
-                Ok(_) => return Err(SSMError { kind: SSMErrorKind::IOError, msg: "launch_ssm_tunnel : Error while attempting to unwrap tunnel child stdout".into() }),
-                _ => return Err(SSMError { kind: SSMErrorKind::IOError, msg: "launch_ssm_tunnel : Error while attempting to unwrap tunnel child stdout AND trying to terminate session".into() })
+                Ok(_) => return Err(SSMError { kind: SSMErrorKind::IO, msg: "launch_ssm_tunnel : Error while attempting to unwrap tunnel child stdout".into() }),
+                _ => return Err(SSMError { kind: SSMErrorKind::IO, msg: "launch_ssm_tunnel : Error while attempting to unwrap tunnel child stdout AND trying to terminate session".into() })
             }
         }
     };
 
     let mut buf_reader = std::io::BufReader::new(stdout);
 
-    let ret = output_tunnel(&mut buf_reader, &logs_sender)?;
+    output_tunnel(&mut buf_reader, &logs_sender)?;
 
     send_or_terminate_session(tx_tunnel_launched, SSMTunnelLaunchedMessage{ok: true}, &aws_client, start_session_output.session_id.clone()).await?;
 
@@ -130,7 +125,7 @@ pub async fn launch_ssm_tunnel(
 
     match tunnel_child.kill() {
         Ok(_) => Ok(()),
-        _ => Err(SSMError { kind: SSMErrorKind::CommandKillError, msg: "Unable to kill tunnel command task".into() })
+        _ => Err(SSMError { kind: SSMErrorKind::CommandKill, msg: "Unable to kill tunnel command task".into() })
     }?;
 
 
@@ -142,7 +137,7 @@ pub async fn launch_ssm_tunnel(
 fn receive<T, E>(res: Result<T, E>) -> Result<(), SSMError> {
     res
     .map_err(|_| {
-        SSMError { kind: SSMErrorKind::TokioChannelError, msg: "Unable to receive message, channel down".into() }
+        SSMError { kind: SSMErrorKind::TokioChannel, msg: "Unable to receive message, channel down".into() }
     })
     .map(|_| ())
 }
@@ -160,7 +155,7 @@ async fn receive_or_terminate_session<T>(res: Result<T, RecvError>, client: &Cli
 }
 
 fn send<T>(tx: Sender<T>, content: T) -> Result<(), SSMError> {
-    tx.send(content).map_err(|_e| SSMError { kind: SSMErrorKind::TokioChannelError, msg: "Unable to send message, channel down".into() })
+    tx.send(content).map_err(|_e| SSMError { kind: SSMErrorKind::TokioChannel, msg: "Unable to send message, channel down".into() })
 }
 
 async fn send_or_terminate_session<T>(tx: Sender<T>, content: T, client: &Client, session_id: Option<String>) -> Result<(), SSMError> {
@@ -199,16 +194,13 @@ struct Opt {
 async fn start_session(target: String, client: &Client) -> Result<StartSessionOutput, SdkError<StartSessionError>> {
     // i-0a6eb481a98d54b72 : VM2
     // i-0f30a1dd89600b0dc : VM1
-    let resp = client.start_session()
+    client.start_session()
         .target(target)
         .document_name("AWS-StartPortForwardingSession")
         .parameters("localPortNumber", vec!["55678".to_string()])
         .parameters("portNumber", vec!["3389".to_string()])
         .send()
         .await
-    ;
-
-    resp
 }
 
 async fn initiate_ssm_port_forwarding(start_session_output: &StartSessionOutput) -> Result<std::process::Child, SSMError> {
@@ -222,7 +214,7 @@ async fn initiate_ssm_port_forwarding(start_session_output: &StartSessionOutput)
 
     let response_string = match serde_json::to_string(&response) {
         Ok(res) => res,
-        Err(_) => return Err(SSMError { kind: SSMErrorKind::SerdeError, msg: "initiate_ssm_port_forwarding : Error when attempting to create response string".into() })
+        Err(_) => return Err(SSMError { kind: SSMErrorKind::Serde, msg: "initiate_ssm_port_forwarding : Error when attempting to create response string".into() })
     };
 
     let mut session_manager_plugin = Command::new("session-manager-plugin");
@@ -237,7 +229,7 @@ async fn initiate_ssm_port_forwarding(start_session_output: &StartSessionOutput)
 
     match run_command_output {
         Ok(c) => Ok(c),
-        Err(_) => return Err(SSMError { kind: SSMErrorKind::CommandSpawnError, msg: "initiate_ssm_port_forwarding : Error when attempting to spawn session manager plugin command thread".into() })
+        Err(_) => Err(SSMError { kind: SSMErrorKind::CommandSpawn, msg: "initiate_ssm_port_forwarding : Error when attempting to spawn session manager plugin command thread".into() })
     }
 
 }
@@ -248,18 +240,18 @@ fn output_tunnel(buf_reader: &mut BufReader<std::process::ChildStdout>, logs_sen
     for _ in 1..5 {
         match buf_reader.read_line(&mut buf) {
             Ok(r) => Ok(r),
-            _ => Err(SSMError { kind: SSMErrorKind::IOError, msg: "output_tunnel : Error while reading tunnel process line".into() })
+            _ => Err(SSMError { kind: SSMErrorKind::IO, msg: "output_tunnel : Error while reading tunnel process line".into() })
         }?;
     }
 
-    send_log(buf.clone().into(), &logs_sender);
+    send_log(buf.clone(), logs_sender);
     //println!("{}", std::str::from_utf8(&last_buf).unwrap());
 
     if buf.contains("Waiting for connections...") {
         return Ok(())
     }
 
-    Err(SSMError { kind: SSMErrorKind::IOError, msg: "output_tunnel : Error while reading tunnel process line".into() })
+    Err(SSMError { kind: SSMErrorKind::IO, msg: "output_tunnel : Error while reading tunnel process line".into() })
 }
 
 // Terminates a SSM session
@@ -271,9 +263,7 @@ async fn terminate_session(client: &Client, session_id: Option<String>) -> Resul
         .await?
     ;
 
-    let session_id: Option<String> = match resp  {
-        TerminateSessionOutput {session_id, ..} => session_id
-    };
+    let TerminateSessionOutput {session_id, ..} = resp;
 
     Ok(session_id)
 }
@@ -288,10 +278,10 @@ async fn terminate_session_with_error<T>(err: SSMError, client: &Client, session
     //let terminate_session_output = runtime.block_on(terminate_session(client, session_id));
 
     match terminate_session(client, session_id).await {
-        Ok(ret) => Err(err),
-        Err(e) => {
+        Ok(_) => Err(err),
+        Err(_) => {
             let msg = "terminate_session_with_error : Error while trying to terminate SSM session AND ".to_string() + &err.msg;
-            Err(SSMError { kind: SSMErrorKind::TerminateSessionError, msg: msg })
+            Err(SSMError { kind: SSMErrorKind::TerminateSession, msg })
         }
     }
 }

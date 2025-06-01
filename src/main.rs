@@ -1,5 +1,5 @@
 #![allow(clippy::result_large_err)]
-use tokio::sync::oneshot::{Receiver, Sender};
+use tokio::sync::oneshot::{Sender};
 use core::{f32};
 use eframe::{egui};
 use tokio::sync::oneshot;
@@ -28,7 +28,7 @@ struct EguiApp {
     logs_sender: std::sync::mpsc::Sender<String>,
     vm1_target: String,
     vm2_target: String,
-    join_handler: Option<std::thread::JoinHandle<()>>,
+    join_handler: Option<std::thread::JoinHandle<Result<(), tasks_handler::TaskHandlerError>>>,
     handler_running: bool
 }
 
@@ -43,8 +43,8 @@ impl Default for EguiApp {
             disabled: false,
             logs_output: "LOGS :\n".into(),
             application_exit_sender: None,
-            logs_receiver: logs_receiver,
-            logs_sender: logs_sender,
+            logs_receiver,
+            logs_sender,
             vm_target: "i-0f30a1dd89600b0dc".into(),
             vm1_target: "i-0f30a1dd89600b0dc".into(),
             vm2_target: "i-0a6eb481a98d54b72".into(),
@@ -56,23 +56,30 @@ impl Default for EguiApp {
 
 impl eframe::App for EguiApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        send_log("Terminate session...".into(), &self.logs_sender);
+        send_log("Egui app : Terminate session...".into(), &self.logs_sender);
         self.application_exit_sender.take().map_or_else(|| send_log("No session to stop".into(), &self.logs_sender) , |tx| {
             tx.send(ApplicationExitedMessage).expect("ApplicationExitedMessage receiver was dropped");
             self.join_handler.take().map_or_else(|| send_log("No thread to stop".into(), &self.logs_sender), |h|  {
                 send_log("Egui app : stop app msg sent to handler, waiting for handler thread to stop.".into(), &self.logs_sender);
-                h.join().expect("Error while joining handler thread");
-                send_log("Handler thread done".into(), &self.logs_sender);
+                let join_result = h.join().expect("Error while joining handler thread");
+                if let Err(e) = join_result {
+                    send_log("Egui app : ".to_string() + &e.msg, &self.logs_sender);
+                }
+                send_log("Egui app : Handler thread done".into(), &self.logs_sender);
             });
         });
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 
+        // Try to see whether task handler is done, if so reactivate app
         let taken_handler = self.join_handler.take_if(|handler| handler.is_finished());
 
         if taken_handler.is_some() {
-            taken_handler.unwrap().join().expect("Error while joining handler thread");
+            let a = taken_handler.unwrap().join().expect("Error while joining handler thread");
+            if let Err(e) = a {
+                send_log("Egui app : ".to_string() + &e.kind.to_string() + " : " +  &e.msg, &self.logs_sender);
+            }
             self.disabled = false;
             self.handler_running = false;
             self.application_exit_sender = None;
@@ -160,7 +167,7 @@ async fn main() -> eframe::Result {
     eframe::run_native(
         "Connection VM",
         options,
-        Box::new(|cc| {
+        Box::new(|_cc| {
             Ok(Box::<EguiApp>::default())
         }),
     )

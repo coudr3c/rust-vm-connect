@@ -4,6 +4,7 @@
 - [ ] Clean up logs
 - [ ] Improve error handling, especially with threading
 - [ X ] Allow stopping a connection
-- [ ] Stop tunnel connection on RDP thread stopped
+- [ X ] Stop tunnel connection on RDP thread stopped
 - [ ] Unit tests
-- [ ] Implement "terminate_session_with_error" that combines an error given with the potential terminate session error
+- [ X ] Implement "terminate_session_with_error" that combines an error given with the potential terminate session error
+- [ ] If rdp file present, use it, else create it then use it

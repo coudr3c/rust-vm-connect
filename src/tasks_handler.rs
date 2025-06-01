@@ -1,52 +1,88 @@
-use crate::ssm::TunnelTaskInstance;
-use crate::messages::{ ApplicationExitedMessage, SSMTunnelLaunchedMessage };
-use crate::utils::send_log;
-use crate::rdp::spawn_rdp;
+use std::fmt::{Display, Formatter};
+use tokio::sync::oneshot::{ Receiver };
 
-use tokio::sync::oneshot::{ Sender, Receiver };
+use crate::ssm::{SSMError, TunnelTaskInstance};
+use crate::messages::{ ApplicationExitedMessage };
+use crate::utils::send_log;
+use crate::rdp::{RDPError, RDPTaskInstance};
+
+#[derive(Debug)]
+pub struct TaskHandlerError {
+    pub kind: TaskHandlerErrorKind,
+    pub msg: String
+}
+#[derive(Debug)]
+#[allow(clippy::upper_case_acronyms)]
+pub enum TaskHandlerErrorKind {
+    SSM,
+    RDP,
+    RDPAndSSM
+}
+
+impl Display for TaskHandlerErrorKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SSM => write!(f, "SSM Error"),
+            Self::RDP => write!(f, "RDP Error"),
+            Self::RDPAndSSM => write!(f, "SSM and RDP Error"),
+        }
+    }
+}
 
 pub async fn start(
     target: String,
-    mut rx_app_exit: Receiver<ApplicationExitedMessage>,
+    rx_app_exit: Receiver<ApplicationExitedMessage>,
     logs_sender: std::sync::mpsc::Sender<String>
-) {
+) -> Result<(), TaskHandlerError> {
 
     let mut tunnel_task_instance = TunnelTaskInstance::spawn(target, logs_sender.clone());
 
     // Wait for tunnel to be set up
     // take() because when value has been received it is invalidated
     if tunnel_task_instance.tunnel_created_receiver.take().unwrap().await.expect("SSMTunnelLaunchedMessage sender was dropped").ok {
-        send_log("Should spawn RDP now, just wait for now".into(), &logs_sender);
+        send_log("Task handler : Should spawn RDP now, just wait for now".into(), &logs_sender);
     } else {
-        send_log("Tunnel start error".into(), &logs_sender);
-        return
+        send_log("Task handler : Tunnel start error".into(), &logs_sender);
+        return Err(TaskHandlerError { kind: TaskHandlerErrorKind::SSM, msg: "Failed to start SSM tunnel (task created msg received with ok false)".into() })
     }
 
-    send_log("Try to spawn RDP".into(), &logs_sender);
-    spawn_rdp().map(async |mut rdp_task| {    
-        loop {
-            match rx_app_exit.try_recv() {
-                // Error => main App is still running
-                Err(_) => {
-                    // Check whether RDP task is still running
-                    if rdp_task.try_wait().is_ok() {
-                        send_log("RDP task over, stop tunnel and handler".into(), &logs_sender);
-                        break
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                }
+    send_log("Task handler : Try to spawn RDP".into(), &logs_sender);
 
-                // App exit message has been received
-                _ => {
-                    if rdp_task.try_wait().is_err() {
-                        rdp_task.kill().expect("Error while trying to kill RDP task");
-                    }
-                    break
-                }
-            }
+    let rdp_task_instance_result = RDPTaskInstance::spawn(rx_app_exit, logs_sender.clone());
+
+    let result = match rdp_task_instance_result {
+        Ok(mut rdp_task_instance) => {
+            let rdp_exit_result = rdp_task_instance.wait_for_exit_or_task_done().await;
+            let ssm_exit_result = tunnel_task_instance.stop().await;
+            combine_ssm_rdp_results(ssm_exit_result, rdp_exit_result)
         }
-    }).expect("Error while trying to spawn RDP command").await;
+        Err(e) => {
+            combine_ssm_rdp_results(tunnel_task_instance.stop().await, Err(e))
+        }
+    };
 
-    tunnel_task_instance.stop().await;
-    send_log("Stop handler".into(), &logs_sender);
+    send_log("Task handler : Stop handler".into(), &logs_sender);
+
+    result
+}
+
+fn combine_ssm_rdp_errors(ssm_err: SSMError, rdp_err: RDPError) -> TaskHandlerError {
+    TaskHandlerError { kind: TaskHandlerErrorKind::RDPAndSSM, msg: "SSM Error : ".to_string() + &ssm_err.msg + "\nRDP Error : " + &rdp_err.msg }
+}
+
+fn combine_ssm_rdp_results(ssm_res: Result<(), SSMError>, rdp_res: Result<(), RDPError>) -> Result<(), TaskHandlerError> {
+    match (ssm_res, rdp_res) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Ok(_), Err(e)) => Err(transform_rdp_error(e)),
+        (Err(e), Ok(_)) => Err(transform_ssm_error(e)),
+        (Err(e_ssm), Err(e_rdp)) => Err(combine_ssm_rdp_errors(e_ssm, e_rdp))
+    }
+}
+
+fn transform_ssm_error(ssm_err: SSMError) -> TaskHandlerError {
+    TaskHandlerError { kind: TaskHandlerErrorKind::SSM, msg: ssm_err.msg }
+}
+
+fn transform_rdp_error(rdp_err: RDPError) -> TaskHandlerError {
+    TaskHandlerError { kind: TaskHandlerErrorKind::RDP, msg: rdp_err.msg }
 }
