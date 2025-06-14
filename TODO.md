@@ -8,3 +8,4 @@
 - [ ] Unit tests
 - [ X ] Implement "terminate_session_with_error" that combines an error given with the potential terminate session error
 - [ ] If rdp file present, use it, else create it then use it
+- [ ] For RDP : "Select connection profile" button, or dropdown with rdp file
