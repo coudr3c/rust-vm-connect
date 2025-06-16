@@ -58,7 +58,7 @@ struct EguiApp {
     logs_sender: std::sync::mpsc::Sender<String>,
     vm1_target: String,
     vm2_target: String,
-    selected_rdp_file: String,
+    selected_rdp_file: Option<PathBuf>,
     join_handler: Option<std::thread::JoinHandle<Result<(), tasks_handler::TaskHandlerError>>>,
     handler_running: bool,
     rdp_files: Vec<PathBuf>,
@@ -86,7 +86,7 @@ impl Default for EguiApp {
             vm_target: "i-0f30a1dd89600b0dc".into(),
             vm1_target: "i-0f30a1dd89600b0dc".into(),
             vm2_target: "i-0a6eb481a98d54b72".into(),
-            selected_rdp_file: first_file_name,
+            selected_rdp_file: rdp_files.first().map(|path| path.to_owned()),
             join_handler: None,
             handler_running: false,
             rdp_files: rdp_files,
@@ -146,16 +146,23 @@ impl eframe::App for EguiApp {
                 ui.selectable_value(&mut self.vm_target, self.vm2_target.clone(), "VM 2");
             });
             egui::ComboBox::from_label("Choisir une connection RDP")
-                .selected_text(&self.selected_rdp_file)
+                .selected_text(
+                    &self
+                        .selected_rdp_file.as_ref()
+                        .and_then(|path| path.file_name())
+                        .and_then(|os_str| os_str.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default(),
+                )
                 .show_ui(ui, |ui| {
                     self.rdp_files
-                        .iter_mut()
-                        .filter_map(|path| path.file_name())
-                        .filter_map(|os_str| os_str.to_str())
-                        .for_each(|file_name| {
+                        .iter()
+                        .filter_map(|path| path.file_name().map(|file_name| (path, file_name)))
+                        .filter_map(|(path, os_str)| os_str.to_str().map(|s| (path, s)))
+                        .for_each(|(path, file_name)| {
                             ui.selectable_value(
                                 &mut self.selected_rdp_file,
-                                file_name.into(),
+                                Some(path.to_owned()),
                                 file_name,
                             );
                         });
@@ -166,25 +173,38 @@ impl eframe::App for EguiApp {
                     .on_disabled_hover_text("Tunnel déjà lancé")
                     .clicked()
                 {
-                    let (tx_exit, rx_exit) = oneshot::channel();
+                    let rdp_file_path_str_opt = self.selected_rdp_file.as_ref().and_then(|path| path.to_str()).map(|s| s.to_string());
 
-                    self.application_exit_sender = Some(tx_exit);
+                    if let Some(rdp_file_path_str) = rdp_file_path_str_opt {
 
-                    let target = self.vm_target.clone();
-                    let logs_sender = self.logs_sender.clone();
+                        let (tx_exit, rx_exit) = oneshot::channel();
 
-                    // Spawns a thread that spawns a tokio task so that
-                    // the gui stays synchronous while still making sure tasks are done
-                    self.join_handler = Some(std::thread::spawn(move || {
-                        tokio::runtime::Builder::new_multi_thread()
-                            .enable_all()
-                            .build()
-                            .unwrap()
-                            .block_on(tasks_handler::start(target, rx_exit, logs_sender))
-                    }));
+                        self.application_exit_sender = Some(tx_exit);
 
-                    self.disabled = true;
-                    self.handler_running = true;
+                        let target = self.vm_target.clone();
+                        let logs_sender = self.logs_sender.clone();
+
+                        // Spawns a thread that spawns a tokio task so that
+                        // the gui stays synchronous while still making sure tasks are done
+                        self.join_handler = Some(std::thread::spawn(move || {
+                            tokio::runtime::Builder::new_multi_thread()
+                                .enable_all()
+                                .build()
+                                .unwrap()
+                                .block_on(tasks_handler::start(
+                                    target,
+                                    rdp_file_path_str,
+                                    rx_exit,
+                                    logs_sender,
+                                ))
+                        }));
+
+                        self.disabled = true;
+                        self.handler_running = true;
+                    } else {
+                        let logs_sender = self.logs_sender.clone();
+                        send_log("GUI : Error while trying to launch connection, file invalid or does not exist".into(), &logs_sender);
+                    }
                 }
             });
             egui::ScrollArea::vertical()

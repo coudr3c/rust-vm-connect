@@ -1,4 +1,4 @@
-use std::{process::{Command}};
+use std::{path::PathBuf, process::Command};
 use tokio::sync::oneshot::Receiver;
 
 use crate::{messages::ApplicationExitedMessage, utils::send_log};
@@ -6,40 +6,40 @@ use crate::{messages::ApplicationExitedMessage, utils::send_log};
 #[derive(Debug)]
 pub struct RDPError {
     kind: RDPErrorKind,
-    pub msg: String
+    pub msg: String,
 }
 
 #[derive(Debug)]
 enum RDPErrorKind {
     Kill,
-    Spawn
+    Spawn,
 }
 
 pub struct RDPTaskInstance {
     receiver_app_exit: Receiver<ApplicationExitedMessage>,
     logs_sender: std::sync::mpsc::Sender<String>,
-    pub task_handler: std::process::Child
+    pub task_handler: std::process::Child,
 }
 
 impl RDPTaskInstance {
     pub fn spawn(
+        path: String,
         receiver_app_exit: Receiver<ApplicationExitedMessage>,
-        logs_sender: std::sync::mpsc::Sender<String>
+        logs_sender: std::sync::mpsc::Sender<String>,
     ) -> Result<RDPTaskInstance, RDPError> {
-        spawn_rdp()
-            .map_err(|e| RDPError { kind: RDPErrorKind::Spawn, msg: "Failed to start RDP task, ".to_string() + &e.to_string() })
-            .map(|c| {
-                RDPTaskInstance {
-                    receiver_app_exit,
-                    logs_sender,
-                    task_handler: c
-                }
+        spawn_rdp(path)
+            .map_err(|e| RDPError {
+                kind: RDPErrorKind::Spawn,
+                msg: "Failed to start RDP task, ".to_string() + &e.to_string(),
+            })
+            .map(|c| RDPTaskInstance {
+                receiver_app_exit,
+                logs_sender,
+                task_handler: c,
             })
     }
 
-    pub async fn wait_for_exit_or_task_done(
-        &mut self,
-    ) -> Result<(), RDPError> {
+    pub async fn wait_for_exit_or_task_done(&mut self) -> Result<(), RDPError> {
         loop {
             match self.receiver_app_exit.try_recv() {
                 // Error => main App is still running
@@ -48,13 +48,16 @@ impl RDPTaskInstance {
                     match self.task_handler.try_wait() {
                         Ok(opt) => {
                             if opt.is_some() {
-                                send_log("Task handler : RDP task over, stop tunnel and handler".into(), &self.logs_sender);
-                                break
+                                send_log(
+                                    "Task handler : RDP task over, stop tunnel and handler".into(),
+                                    &self.logs_sender,
+                                );
+                                break;
                             }
                         }
                         Err(_) => {
                             send_log("Task handler : RDP task exited with error, stop tunnel and handler".into(), &self.logs_sender);
-                            break
+                            break;
                         }
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -63,8 +66,10 @@ impl RDPTaskInstance {
                 // App exit message has been received
                 _ => {
                     if self.task_handler.try_wait().is_err() {
-                        return self.task_handler.kill()
-                            .map_err(|_| RDPError { kind: RDPErrorKind::Kill, msg: "Error while trying to kill RDP task".into()})
+                        return self.task_handler.kill().map_err(|_| RDPError {
+                            kind: RDPErrorKind::Kill,
+                            msg: "Error while trying to kill RDP task".into(),
+                        });
                     }
                 }
             }
@@ -73,8 +78,8 @@ impl RDPTaskInstance {
     }
 }
 
-fn spawn_rdp() -> Result<std::process::Child, std::io::Error> {
+fn spawn_rdp(path: String) -> Result<std::process::Child, std::io::Error> {
     Command::new("cmd")
-        .args(["/c", "start", "/wait", "mstsc"])
+        .args(["/c", "start", "/wait", "mstsc", &path])
         .spawn()
 }
