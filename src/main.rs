@@ -20,6 +20,8 @@ mod errors;
 mod utils;
 use utils::send_log;
 
+const RDP_EXTENSION: &str = "rdp";
+
 fn read_files_in_directory_with_extension(
     extension: &str,
     logs_sender: &LogsSender<String>,
@@ -35,7 +37,7 @@ fn read_files_in_directory_with_extension(
 }
 
 fn find_rdp_files(logs_sender: &LogsSender<String>) -> Vec<PathBuf> {
-    match read_files_in_directory_with_extension("rdp", logs_sender) {
+    match read_files_in_directory_with_extension(RDP_EXTENSION, logs_sender) {
         Ok(vec) => vec,
         Err(e) => {
             send_log(
