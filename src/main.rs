@@ -21,6 +21,8 @@ mod utils;
 use utils::send_log;
 
 const RDP_EXTENSION: &str = "rdp";
+const VM_TARGET_1: &str = "i-0f30a1dd89600b0dc";
+const VM_TARGET_2: &str = "i-0a6eb481a98d54b72";
 
 fn read_files_in_directory_with_extension(
     extension: &str,
@@ -85,9 +87,9 @@ impl Default for EguiApp {
             application_exit_sender: None,
             logs_receiver,
             logs_sender,
-            vm_target: "i-0f30a1dd89600b0dc".into(),
-            vm1_target: "i-0f30a1dd89600b0dc".into(),
-            vm2_target: "i-0a6eb481a98d54b72".into(),
+            vm_target: VM_TARGET_1.into(),
+            vm1_target: VM_TARGET_1.into(),
+            vm2_target: VM_TARGET_2.into(),
             selected_rdp_file: rdp_files.first().map(|path| path.to_owned()),
             join_handler: None,
             handler_running: false,
@@ -134,15 +136,15 @@ impl eframe::App for EguiApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Connection VM SSM");
-            ui.horizontal(|ui| {
-                let username_label = ui.label("Nom d'Utilisateur VM : ");
-                ui.text_edit_singleline(&mut self.username)
-                    .labelled_by(username_label.id);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Mot de passe VM : ");
-                ui.add(egui::TextEdit::singleline(&mut self.pwd).password(true));
-            });
+            // ui.horizontal(|ui| {
+            //     let username_label = ui.label("Nom d'Utilisateur VM : ");
+            //     ui.text_edit_singleline(&mut self.username)
+            //         .labelled_by(username_label.id);
+            // });
+            // ui.horizontal(|ui| {
+            //     ui.label("Mot de passe VM : ");
+            //     ui.add(egui::TextEdit::singleline(&mut self.pwd).password(true));
+            // });
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.vm_target, self.vm1_target.clone(), "VM 1");
                 ui.selectable_value(&mut self.vm_target, self.vm2_target.clone(), "VM 2");
@@ -225,21 +227,12 @@ impl eframe::App for EguiApp {
     }
 }
 
-// snippet-end:[ssm.rust.describe-parameters]
-
-/// Lists the names of your AWS Systems Manager parameters in the Region.
-/// # Arguments
-///
-/// * `[-r REGION]` - The Region in which the client is created.
-///    If not supplied, uses the value of the **AWS_REGION** environment variable.
-///    If the environment variable is not set, defaults to **us-west-2**.
-/// * `[-v]` - Whether to display additional information.
 #[tokio::main]
 async fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([600f32, 800f32])
-            .with_min_inner_size([600f32, 800f32]),
+            .with_inner_size([500f32, 300f32])
+            .with_min_inner_size([400f32, 200f32]),
         ..Default::default()
     };
 

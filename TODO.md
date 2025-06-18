@@ -4,7 +4,7 @@
 
 - [X] Propagate RDP file info to RDP command
 - [ ] Test on Windows using the actual Windows RDP command
-- [ ] Integration tests
+- [ ] Remove hard coded variables such as VM targets
 
 ## Should
 
@@ -13,6 +13,7 @@
 - [X] Allow stopping a connection
 - [X] Stop tunnel connection on RDP thread stopped
 - [X] Implement "terminate_session_with_error" that combines an error given with the potential terminate session error
+- [ ] Integration tests
 
 ## Would
 

@@ -35,7 +35,10 @@ pub async fn start(
     rx_app_exit: Receiver<ApplicationExitedMessage>,
     logs_sender: std::sync::mpsc::Sender<String>,
 ) -> Result<(), TaskHandlerError> {
+    send_log("Task handler : Starting handler...".into(), &logs_sender);
     let mut tunnel_task_instance = TunnelTaskInstance::spawn(target, logs_sender.clone());
+
+    send_log("Task handler : Spawned SSM task".into(), &logs_sender);
 
     // Wait for tunnel to be set up
     // take() because when value has been received it is invalidated

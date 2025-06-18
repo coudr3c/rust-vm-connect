@@ -8,6 +8,7 @@ use aws_sdk_ssm::{
 };
 use clap::Parser;
 use serde::Serialize;
+use std::io::Read;
 use std::{
     io::{BufRead, BufReader},
     process::{Command, Stdio},
@@ -46,9 +47,18 @@ pub struct TunnelTaskInstance {
 
 impl TunnelTaskInstance {
     pub fn spawn(target: String, logs_sender: std::sync::mpsc::Sender<String>) -> Self {
+        send_log(
+            "TunnelTaskInstance : Starting instance...".into(),
+            &logs_sender,
+        );
         let (tx_tunnel_launched, rx_tunnel_launched) = oneshot::channel();
         let (tx_exit_ssm, rx_exit_ssm) = oneshot::channel();
         let (tx_exit_ssm_ack, rx_exit_ssm_ack) = oneshot::channel();
+
+        send_log(
+            "TunnelTaskInstance : Spawning tunnel...".into(),
+            &logs_sender,
+        );
 
         let ssm_tunnel_task: tokio::task::JoinHandle<Result<(), SSMError>> =
             tokio::spawn(launch_ssm_tunnel(
@@ -58,6 +68,8 @@ impl TunnelTaskInstance {
                 tx_exit_ssm_ack,
                 logs_sender.clone(),
             ));
+
+        send_log("TunnelTaskInstance : Tunnel spawned".into(), &logs_sender);
 
         TunnelTaskInstance {
             stop_sender: tx_exit_ssm,
@@ -103,8 +115,20 @@ pub async fn launch_ssm_tunnel(
     tx_app_exit_ack: Sender<ApplicationExitedMessage>,
     logs_sender: std::sync::mpsc::Sender<String>,
 ) -> Result<(), SSMError> {
+    send_log(
+        "TunnelTaskInstance/launch_ssm_tunnel : Initiate aws client...".into(),
+        &logs_sender,
+    );
     let aws_client = initiate_aws_client().await;
+    send_log(
+        "TunnelTaskInstance/launch_ssm_tunnel : Initiate aws client OK".into(),
+        &logs_sender,
+    );
 
+    send_log(
+        "TunnelTaskInstance/launch_ssm_tunnel : Start session...".into(),
+        &logs_sender,
+    );
     let start_session_output = match start_session(vm_target, &aws_client).await {
         Ok(s) => s,
         _ => {
@@ -115,27 +139,57 @@ pub async fn launch_ssm_tunnel(
         }
     };
 
+    send_log(
+        "TunnelTaskInstance/launch_ssm_tunnel : Start session OK".into(),
+        &logs_sender,
+    );
+
+    send_log(
+        "TunnelTaskInstance/launch_ssm_tunnel : Initiate SSM port forwarding...".into(),
+        &logs_sender,
+    );
     let mut tunnel_child = try_or_terminate_session(
         initiate_ssm_port_forwarding(&start_session_output).await,
         &aws_client,
         start_session_output.session_id.clone(),
     )
     .await?;
+    send_log(
+        "TunnelTaskInstance/launch_ssm_tunnel : Initiate SSM port forwarding OK".into(),
+        &logs_sender,
+    );
 
-    let stdout =
-        match tunnel_child.stdout.take() {
-            Some(c) => c,
-            _ => {
-                match terminate_session(&aws_client, start_session_output.session_id.clone()).await {
-                Ok(_) => return Err(SSMError { kind: SSMErrorKind::IO, msg: "launch_ssm_tunnel : Error while attempting to unwrap tunnel child stdout".into() }),
-                _ => return Err(SSMError { kind: SSMErrorKind::IO, msg: "launch_ssm_tunnel : Error while attempting to unwrap tunnel child stdout AND trying to terminate session".into() })
-            }
-            }
-        };
+    /*
+     * DEACTIVATED FOR NOW
+     */
+    // let stdout =
+    //     match tunnel_child.stdout.take() {
+    //         Some(c) => c,
+    //         _ => {
+    //             match terminate_session(&aws_client, start_session_output.session_id.clone()).await {
+    //             Ok(_) => return Err(SSMError { kind: SSMErrorKind::IO, msg: "launch_ssm_tunnel : Error while attempting to unwrap tunnel child stdout".into() }),
+    //             _ => return Err(SSMError { kind: SSMErrorKind::IO, msg: "launch_ssm_tunnel : Error while attempting to unwrap tunnel child stdout AND trying to terminate session".into() })
+    //         }
+    //         }
+    //     };
 
-    let mut buf_reader = std::io::BufReader::new(stdout);
+    //let mut buf_reader = std::io::BufReader::new(stdout);
 
-    output_tunnel(&mut buf_reader, &logs_sender)?;
+    // send_log(
+    //     "TunnelTaskInstance/launch_ssm_tunnel : Try output tunnel stdout...".into(),
+    //     &logs_sender,
+    // );
+
+    // output_tunnel(&mut buf_reader, &logs_sender)?;
+
+    // send_log(
+    //     "TunnelTaskInstance/launch_ssm_tunnel : Output tunnel stdout OK".into(),
+    //     &logs_sender,
+    // );
+    send_log(
+        "TunnelTaskInstance/launch_ssm_tunnel : Send SSMTunnelLaunchedMessage".into(),
+        &logs_sender,
+    );
 
     send_or_terminate_session(
         tx_tunnel_launched,
@@ -145,12 +199,22 @@ pub async fn launch_ssm_tunnel(
     )
     .await?;
 
+    send_log(
+        "TunnelTaskInstance/launch_ssm_tunnel : Wait/receive app exit message...".into(),
+        &logs_sender,
+    );
+
     receive_or_terminate_session(
         rx_app_exit.await,
         &aws_client,
         start_session_output.session_id.clone(),
     )
     .await?;
+
+    send_log(
+        "TunnelTaskInstance/launch_ssm_tunnel : Wait/receive app exit message OK".into(),
+        &logs_sender,
+    );
 
     send_log("SSM Tunnel : stop app received".into(), &logs_sender);
 
@@ -260,8 +324,6 @@ async fn start_session(
     target: String,
     client: &Client,
 ) -> Result<StartSessionOutput, SdkError<StartSessionError>> {
-    // i-0a6eb481a98d54b72 : VM2
-    // i-0f30a1dd89600b0dc : VM1
     client
         .start_session()
         .target(target)
@@ -296,7 +358,7 @@ async fn initiate_ssm_port_forwarding(
     let mut session_manager_plugin = Command::new("session-manager-plugin");
     let run_command_output = session_manager_plugin
         .args([response_string, "eu-west-1".into(), "StartSession".into()])
-        .stdout(Stdio::piped())
+        //.stdout(Stdio::piped())
         .spawn();
 
     match run_command_output {
@@ -305,26 +367,34 @@ async fn initiate_ssm_port_forwarding(
     }
 }
 
+/**
+ * Wonky stuff, if AWS SSM changes its log output, it might make the following break
+ */
 fn output_tunnel(
     buf_reader: &mut BufReader<std::process::ChildStdout>,
     logs_sender: &std::sync::mpsc::Sender<String>,
 ) -> Result<(), SSMError> {
-    let mut buf = String::new();
+    send_log(
+        "TunnelTaskInstance/output_tunnel : Read buffer...".into(),
+        &logs_sender,
+    );
 
     for _ in 1..5 {
-        match buf_reader.read_line(&mut buf) {
-            Ok(r) => Ok(r),
-            _ => Err(SSMError {
-                kind: SSMErrorKind::IO,
-                msg: "output_tunnel : Error while reading tunnel process line".into(),
-            }),
-        }?;
-    }
+        let mut buf = String::new();
+        buf_reader.read_line(&mut buf).map_err(|_| SSMError {
+            kind: SSMErrorKind::IO,
+            msg: "output_tunnel : Error while reading tunnel process line".into(),
+        })?;
 
-    send_log(buf.clone(), logs_sender);
-
-    if buf.contains("Waiting for connections...") {
-        return Ok(());
+        if buf.contains("Waiting for connections...") {
+            send_log(
+                "TunnelTaskInstance/output_tunnel : Read buffer OK".into(),
+                &logs_sender,
+            );
+            send_log(buf, logs_sender);
+            return Ok(());
+        }
+        send_log(buf, logs_sender);
     }
 
     Err(SSMError {
