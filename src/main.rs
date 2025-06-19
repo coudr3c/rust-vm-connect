@@ -23,6 +23,7 @@ use utils::send_log;
 const RDP_EXTENSION: &str = "rdp";
 const VM_TARGET_1: &str = "i-0f30a1dd89600b0dc";
 const VM_TARGET_2: &str = "i-0a6eb481a98d54b72";
+const LOCAL_PORT_NUMBER: &str = "9090";
 
 fn read_files_in_directory_with_extension(
     extension: &str,
@@ -66,6 +67,7 @@ struct EguiApp {
     join_handler: Option<std::thread::JoinHandle<Result<(), tasks_handler::TaskHandlerError>>>,
     handler_running: bool,
     rdp_files: Vec<PathBuf>,
+    local_port_number: String,
 }
 
 impl Default for EguiApp {
@@ -94,6 +96,7 @@ impl Default for EguiApp {
             join_handler: None,
             handler_running: false,
             rdp_files: rdp_files,
+            local_port_number: LOCAL_PORT_NUMBER.to_string(),
         }
     }
 }
@@ -146,6 +149,10 @@ impl eframe::App for EguiApp {
             //     ui.add(egui::TextEdit::singleline(&mut self.pwd).password(true));
             // });
             ui.horizontal(|ui| {
+                ui.label("Port local : ");
+                ui.add(egui::TextEdit::singleline(&mut self.local_port_number));
+            });
+            ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.vm_target, self.vm1_target.clone(), "VM 1");
                 ui.selectable_value(&mut self.vm_target, self.vm2_target.clone(), "VM 2");
             });
@@ -187,6 +194,7 @@ impl eframe::App for EguiApp {
 
                         let target = self.vm_target.clone();
                         let logs_sender = self.logs_sender.clone();
+                        let local_port_number = self.local_port_number.clone();
 
                         // Spawns a thread that spawns a tokio task so that
                         // the gui stays synchronous while still making sure tasks are done
@@ -199,6 +207,7 @@ impl eframe::App for EguiApp {
                                     target,
                                     rdp_file_path_str,
                                     rx_exit,
+                                    local_port_number,
                                     logs_sender,
                                 ))
                         }));
@@ -211,18 +220,19 @@ impl eframe::App for EguiApp {
                     }
                 }
             });
-            egui::ScrollArea::vertical()
-                .max_width(f32::INFINITY)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    ui.group(|ui| {
-                        let new_log = self.logs_receiver.try_recv().unwrap_or_default();
-                        self.logs_output.push_str(&new_log);
+            // For debug, no need in production since we output to log file
+            // egui::ScrollArea::vertical()
+            //     .max_width(f32::INFINITY)
+            //     .stick_to_bottom(true)
+            //     .show(ui, |ui| {
+            //         ui.group(|ui| {
+            //             let new_log = self.logs_receiver.try_recv().unwrap_or_default();
+            //             self.logs_output.push_str(&new_log);
 
-                        ui.label(&self.logs_output);
-                        ui.set_width(ui.available_width());
-                    });
-                })
+            //             ui.label(&self.logs_output);
+            //             ui.set_width(ui.available_width());
+            //         });
+            //     })
         });
     }
 }

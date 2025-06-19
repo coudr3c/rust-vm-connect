@@ -33,10 +33,12 @@ pub async fn start(
     target: String,
     rdp_file_path: String,
     rx_app_exit: Receiver<ApplicationExitedMessage>,
+    local_port_number: String,
     logs_sender: std::sync::mpsc::Sender<String>,
 ) -> Result<(), TaskHandlerError> {
     send_log("Task handler : Starting handler...".into(), &logs_sender);
-    let mut tunnel_task_instance = TunnelTaskInstance::spawn(target, logs_sender.clone());
+    let mut tunnel_task_instance =
+        TunnelTaskInstance::spawn(target, local_port_number, logs_sender.clone());
 
     send_log("Task handler : Spawned SSM task".into(), &logs_sender);
 
@@ -134,6 +136,7 @@ mod tests {
                 format!("NO TARGET"),
                 format!("NO RDP FILE"),
                 rx,
+                format!("9090"),
                 logs_sender,
             ));
         assert!(

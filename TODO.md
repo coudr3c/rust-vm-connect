@@ -14,6 +14,7 @@
 - [X] Stop tunnel connection on RDP thread stopped
 - [X] Implement "terminate_session_with_error" that combines an error given with the potential terminate session error
 - [ ] Integration tests
+- [X] Let users choose port number
 
 ## Would
 

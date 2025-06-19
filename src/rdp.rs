@@ -27,7 +27,7 @@ impl RDPTaskInstance {
         receiver_app_exit: Receiver<ApplicationExitedMessage>,
         logs_sender: std::sync::mpsc::Sender<String>,
     ) -> Result<RDPTaskInstance, RDPError> {
-        spawn_rdp(path)
+        spawn_rdp(path, &logs_sender)
             .map_err(|e| RDPError {
                 kind: RDPErrorKind::Spawn,
                 msg: "Failed to start RDP task, ".to_string() + &e.to_string(),
@@ -49,14 +49,15 @@ impl RDPTaskInstance {
                         Ok(opt) => {
                             if opt.is_some() {
                                 send_log(
-                                    "Task handler : RDP task over, stop tunnel and handler".into(),
+                                    "RDP Task Instance : RDP task over, stop tunnel and handler"
+                                        .into(),
                                     &self.logs_sender,
                                 );
                                 break;
                             }
                         }
                         Err(_) => {
-                            send_log("Task handler : RDP task exited with error, stop tunnel and handler".into(), &self.logs_sender);
+                            send_log("RDP Task Instance : RDP task exited with error, stop tunnel and handler".into(), &self.logs_sender);
                             break;
                         }
                     }
@@ -78,7 +79,14 @@ impl RDPTaskInstance {
     }
 }
 
-fn spawn_rdp(path: String) -> Result<std::process::Child, std::io::Error> {
+fn spawn_rdp(
+    path: String,
+    logs_sender: &std::sync::mpsc::Sender<String>,
+) -> Result<std::process::Child, std::io::Error> {
+    send_log(
+        format!("RDP Task Instance : Launch RDP for file {}", path),
+        logs_sender,
+    );
     Command::new("cmd")
         .args(["/c", "start", "/wait", "mstsc", &path])
         .spawn()

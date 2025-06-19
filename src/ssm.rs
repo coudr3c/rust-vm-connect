@@ -20,6 +20,9 @@ use tokio::sync::oneshot::{Receiver, Sender};
 use crate::messages::{ApplicationExitedMessage, SSMTunnelLaunchedMessage};
 use crate::utils::send_log;
 
+const LOCAL_PORT_NUMBER: &str = "9090";
+const REMOTE_PORT_NUMBER: &str = "3389";
+
 #[derive(Debug)]
 pub struct SSMError {
     pub kind: SSMErrorKind,
@@ -46,7 +49,11 @@ pub struct TunnelTaskInstance {
 }
 
 impl TunnelTaskInstance {
-    pub fn spawn(target: String, logs_sender: std::sync::mpsc::Sender<String>) -> Self {
+    pub fn spawn(
+        target: String,
+        local_port_number: String,
+        logs_sender: std::sync::mpsc::Sender<String>,
+    ) -> Self {
         send_log(
             "TunnelTaskInstance : Starting instance...".into(),
             &logs_sender,
@@ -66,6 +73,7 @@ impl TunnelTaskInstance {
                 tx_tunnel_launched,
                 rx_exit_ssm,
                 tx_exit_ssm_ack,
+                local_port_number,
                 logs_sender.clone(),
             ));
 
@@ -113,6 +121,7 @@ pub async fn launch_ssm_tunnel(
     tx_tunnel_launched: Sender<SSMTunnelLaunchedMessage>,
     rx_app_exit: Receiver<ApplicationExitedMessage>,
     tx_app_exit_ack: Sender<ApplicationExitedMessage>,
+    local_port_number: String,
     logs_sender: std::sync::mpsc::Sender<String>,
 ) -> Result<(), SSMError> {
     send_log(
@@ -129,7 +138,8 @@ pub async fn launch_ssm_tunnel(
         "TunnelTaskInstance/launch_ssm_tunnel : Start session...".into(),
         &logs_sender,
     );
-    let start_session_output = match start_session(vm_target, &aws_client).await {
+    let start_session_output = match start_session(vm_target, &aws_client, local_port_number).await
+    {
         Ok(s) => s,
         _ => {
             return Err(SSMError {
@@ -323,13 +333,14 @@ struct Opt {
 async fn start_session(
     target: String,
     client: &Client,
+    local_port_number: String,
 ) -> Result<StartSessionOutput, SdkError<StartSessionError>> {
     client
         .start_session()
         .target(target)
         .document_name("AWS-StartPortForwardingSession")
-        .parameters("localPortNumber", vec!["55678".to_string()])
-        .parameters("portNumber", vec!["3389".to_string()])
+        .parameters("localPortNumber", vec![local_port_number])
+        .parameters("portNumber", vec![REMOTE_PORT_NUMBER.to_string()])
         .send()
         .await
 }
