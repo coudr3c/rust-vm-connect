@@ -1,7 +1,9 @@
+use std::os::windows::process::CommandExt;
 use std::{path::PathBuf, process::Command};
 use tokio::sync::oneshot::Receiver;
 
-use crate::{messages::ApplicationExitedMessage, utils::send_log};
+use crate::messages::ApplicationExitedMessage;
+use crate::utils::{CREATE_NO_WINDOW, send_log};
 
 #[derive(Debug)]
 pub struct RDPError {
@@ -89,5 +91,6 @@ fn spawn_rdp(
     );
     Command::new("cmd")
         .args(["/c", "start", "/wait", "mstsc", &path])
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
 }

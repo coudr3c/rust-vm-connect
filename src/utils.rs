@@ -2,6 +2,8 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 
+pub const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 // TODO handle sync
 pub fn send_log(s: String, logs_sender: &std::sync::mpsc::Sender<String>) {
     // open file in append mode

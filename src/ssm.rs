@@ -9,6 +9,7 @@ use aws_sdk_ssm::{
 use clap::Parser;
 use serde::Serialize;
 use std::io::Read;
+use std::os::windows::process::CommandExt;
 use std::{
     io::{BufRead, BufReader},
     process::{Command, Stdio},
@@ -18,7 +19,7 @@ use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::oneshot::{Receiver, Sender};
 
 use crate::messages::{ApplicationExitedMessage, SSMTunnelLaunchedMessage};
-use crate::utils::send_log;
+use crate::utils::{CREATE_NO_WINDOW, send_log};
 
 const LOCAL_PORT_NUMBER: &str = "9090";
 const REMOTE_PORT_NUMBER: &str = "3389";
@@ -369,6 +370,7 @@ async fn initiate_ssm_port_forwarding(
     let mut session_manager_plugin = Command::new("session-manager-plugin");
     let run_command_output = session_manager_plugin
         .args([response_string, "eu-west-1".into(), "StartSession".into()])
+        .creation_flags(CREATE_NO_WINDOW)
         //.stdout(Stdio::piped())
         .spawn();
 

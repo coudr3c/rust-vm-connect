@@ -1,4 +1,6 @@
 #![allow(clippy::result_large_err)]
+#![windows_subsystem = "windows"]
+
 use core::f32;
 use eframe::egui;
 use std::ffi::{OsStr, OsString};
@@ -23,7 +25,7 @@ use utils::send_log;
 const RDP_EXTENSION: &str = "rdp";
 const VM_TARGET_1: &str = "i-0f30a1dd89600b0dc";
 const VM_TARGET_2: &str = "i-0a6eb481a98d54b72";
-const LOCAL_PORT_NUMBER: &str = "9090";
+const LOCAL_PORT_NUMBER: &str = "55678";
 
 fn read_files_in_directory_with_extension(
     extension: &str,
@@ -138,7 +140,7 @@ impl eframe::App for EguiApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Connection VM SSM");
+            ui.heading("Connexion VM SSM");
             // ui.horizontal(|ui| {
             //     let username_label = ui.label("Nom d'Utilisateur VM : ");
             //     ui.text_edit_singleline(&mut self.username)
@@ -247,7 +249,7 @@ async fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "Connection VM",
+        "Connexion VM",
         options,
         Box::new(|_cc| Ok(Box::<EguiApp>::default())),
     )
