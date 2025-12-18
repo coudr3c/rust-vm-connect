@@ -25,6 +25,7 @@ use utils::send_log;
 const RDP_EXTENSION: &str = "rdp";
 const VM_TARGET_1: &str = "i-0f30a1dd89600b0dc";
 const VM_TARGET_2: &str = "i-0a6eb481a98d54b72";
+const VM_TARGET_3: &str = "i-03a933321d29f9f95";
 const LOCAL_PORT_NUMBER: &str = "55678";
 
 fn read_files_in_directory_with_extension(
@@ -65,6 +66,7 @@ struct EguiApp {
     logs_sender: std::sync::mpsc::Sender<String>,
     vm1_target: String,
     vm2_target: String,
+    vm3_target: String,
     selected_rdp_file: Option<PathBuf>,
     join_handler: Option<std::thread::JoinHandle<Result<(), tasks_handler::TaskHandlerError>>>,
     handler_running: bool,
@@ -94,6 +96,7 @@ impl Default for EguiApp {
             vm_target: VM_TARGET_1.into(),
             vm1_target: VM_TARGET_1.into(),
             vm2_target: VM_TARGET_2.into(),
+            vm3_target: VM_TARGET_3.into(),
             selected_rdp_file: rdp_files.first().map(|path| path.to_owned()),
             join_handler: None,
             handler_running: false,
@@ -157,6 +160,8 @@ impl eframe::App for EguiApp {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.vm_target, self.vm1_target.clone(), "VM 1");
                 ui.selectable_value(&mut self.vm_target, self.vm2_target.clone(), "VM 2");
+                ui.selectable_value(&mut self.vm_target, self.vm3_target.clone(), "VM 3");
+                
             });
             egui::ComboBox::from_label("Choisir une connection RDP")
                 .selected_text(
